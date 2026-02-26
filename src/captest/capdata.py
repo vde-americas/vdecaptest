@@ -37,6 +37,7 @@ import param
 
 from captest import util
 from captest import plotting
+from captest import prtest
 
 # visualization library imports
 hv_spec = importlib.util.find_spec("holoviews")
@@ -94,6 +95,21 @@ met_keys = ["poa", "t_amb", "w_vel", "power"]
 
 
 columns = ["pts_after_filter", "pts_removed", "filter_arguments"]
+
+
+# Standard configuration dictionary
+STANDARDS = {
+    "ASTM": {
+        "regression_formula": "power ~ poa + I(poa * poa) + I(poa * t_amb) + I(poa * w_vel) - 1",
+        "required_cols": ["power", "poa", "t_amb", "w_vel"],
+        "description": "ASTM E2848 - Multiple linear regression",
+    },
+    "IEC": {
+        "regression_formula": "power_corrected ~ poa",
+        "required_cols": ["power", "poa"],
+        "description": "IEC 61724-2 - Simple linear regression on temperature-corrected power",
+    },
+}
 
 
 def round_kwarg_floats(kwarg_dict, decimals=3):
@@ -1223,6 +1239,10 @@ def predict_with_pvalue_check(cd, rc=None, pval_threshold=0.05):
     Uses model.predict() with custom params to ensure consistent behavior
     across pandas 2.x and 3.0+ (avoids Copy-on-Write issues).
 
+    For IEC standard: predicts power_corrected, which needs to be converted
+    back to actual power if needed (though typically the corrected power is
+    what's compared).
+
     Parameters
     ----------
     cd : CapData
@@ -1239,6 +1259,8 @@ def predict_with_pvalue_check(cd, rc=None, pval_threshold=0.05):
     -------
     float
         Predicted value at reporting conditions.
+        For IEC: returns predicted power_corrected.
+        For ASTM: returns predicted power.
     """
     results = cd.regression_results
     if rc is None:
@@ -1250,9 +1272,28 @@ def predict_with_pvalue_check(cd, rc=None, pval_threshold=0.05):
         for key, pval in results.pvalues.items():
             if pval > pval_threshold:
                 modified_params[key] = 0
-    # Create design matrix from reporting conditions
-    design_info = results.model.data.design_info
-    exog = dmatrix(design_info, rc)
+
+    # For IEC standard, regression is on power_corrected ~ poa
+    # So we only need poa in the reporting conditions
+    if cd.standard == "IEC":
+        # Ensure rc has poa column
+        if isinstance(rc, pd.DataFrame):
+            if "poa" in rc.columns:
+                rc_iec = rc[["poa"]].copy()
+            else:
+                # Fallback: use first column but rename to "poa" for regression formula
+                rc_iec = rc.iloc[:, [0]].copy()
+                rc_iec.columns = ["poa"]
+        else:
+            rc_iec = pd.DataFrame({"poa": [rc["poa"]] if isinstance(rc, dict) else [rc]})
+        # Create design matrix from reporting conditions
+        design_info = results.model.data.design_info
+        exog = dmatrix(design_info, rc_iec)
+    else:
+        # For ASTM, use all reporting conditions
+        design_info = results.model.data.design_info
+        exog = dmatrix(design_info, rc)
+
     # Predict using model.predict with custom params
     return results.model.predict(modified_params, exog)[0]
 
@@ -1292,8 +1333,21 @@ def captest_results(
     and the measured data divided by the capacity calculated from the reporting
     conditions and the simulated data.
     """
+    # Check that both objects use the same standard
+    if sim.standard != das.standard:
+        raise ValueError(
+            f"CapData objects use different standards: sim uses '{sim.standard}', "
+            f"das uses '{das.standard}'. Both must use the same standard."
+        )
+
+    # For IEC, regression formulas should match (both power_corrected ~ poa)
+    # For ASTM, regression formulas should match
     if sim.regression_formula != das.regression_formula:
-        return warnings.warn("CapData objects do not have the same regression formula.")
+        raise ValueError(
+            "CapData objects do not have the same regression formula. "
+            f"sim: '{sim.regression_formula}', das: '{das.regression_formula}'. "
+            "Incompatible models cannot produce meaningful capacity test results."
+        )
 
     rc_result = pick_attr(sim, das, "rc")
     if print_res:
@@ -1641,11 +1695,22 @@ class CapData(object):
         String representing error band.  Ex. '+ 3', '+/- 3', '- 5'
         There must be space between the sign and number. Number is
         interpreted as a percent.  For example, 5 percent is 5 not 0.05.
+    standard : str, default 'ASTM'
+        Capacity test standard to use. Options: 'ASTM' (ASTM E2848) or 'IEC' (IEC 61724-2).
+    iec_params : dict
+        Dictionary storing IEC-specific parameters: beta (temperature coefficient),
+        delta_t (temperature difference constant), e_ref (reference irradiance, default 1000),
+        t_stc (standard test conditions temperature, default 25), module_type, racking.
     """
 
-    def __init__(self, name):  # noqa: D107
+    def __init__(self, name, standard="ASTM"):  # noqa: D107
         super(CapData, self).__init__()
+        if standard not in STANDARDS:
+            raise ValueError(
+                f"Standard must be one of {list(STANDARDS.keys())}, got '{standard}'"
+            )
         self.name = name
+        self.standard = standard
         self.data = pd.DataFrame()
         self.data_filtered = None
         self.column_groups = {}
@@ -1657,13 +1722,20 @@ class CapData(object):
         self.filter_counts = {}
         self.rc = None
         self.regression_results = None
-        self.regression_formula = (
-            "power ~ poa + I(poa * poa) + I(poa * t_amb) + I(poa * w_vel) - 1"
-        )
+        self.regression_formula = STANDARDS[standard]["regression_formula"]
         self.tolerance = None
         self.pre_agg_cols = None
         self.pre_agg_trans = None
         self.pre_agg_reg_trans = None
+        # IEC-specific parameters
+        self.iec_params = {
+            "beta": None,  # Temperature coefficient (%/°C)
+            "delta_t": 3.0,  # Temperature difference constant (°C), default 3 for flat-plate
+            "e_ref": 1000.0,  # Reference irradiance (W/m²)
+            "t_stc": 25.0,  # Standard test conditions temperature (°C)
+            "module_type": "glass_cell_poly",  # Module type for cell_temp calculation
+            "racking": "open_rack",  # Racking type for cell_temp calculation
+        }
         self.loc = LocIndexer(self)
         self.floc = FilteredLocIndexer(self)
 
@@ -1695,9 +1767,51 @@ class CapData(object):
             "w_vel": w_vel,
         }
 
+    def set_iec_params(
+        self,
+        beta=None,
+        delta_t=None,
+        e_ref=None,
+        t_stc=None,
+        module_type=None,
+        racking=None,
+    ):
+        """
+        Set IEC 61724-2 specific parameters for temperature correction.
+
+        Parameters
+        ----------
+        beta : float, optional
+            Temperature coefficient of power (%/°C). Required for IEC standard.
+        delta_t : float, optional
+            Temperature difference constant (°C). Default is 3.0 for flat-plate modules.
+        e_ref : float, optional
+            Reference irradiance (W/m²). Default is 1000.0.
+        t_stc : float, optional
+            Standard test conditions temperature (°C). Default is 25.0.
+        module_type : str, optional
+            Module type for cell temperature calculation. Options: 'glass_cell_poly',
+            'glass_cell_glass', 'poly_tf_steel'. Default is 'glass_cell_poly'.
+        racking : str, optional
+            Racking type for cell temperature calculation. Options: 'open_rack',
+            'close_roof_mount', 'insulated_back'. Default is 'open_rack'.
+        """
+        if beta is not None:
+            self.iec_params["beta"] = beta
+        if delta_t is not None:
+            self.iec_params["delta_t"] = delta_t
+        if e_ref is not None:
+            self.iec_params["e_ref"] = e_ref
+        if t_stc is not None:
+            self.iec_params["t_stc"] = t_stc
+        if module_type is not None:
+            self.iec_params["module_type"] = module_type
+        if racking is not None:
+            self.iec_params["racking"] = racking
+
     def copy(self):
         """Create and returns a copy of self."""
-        cd_c = CapData("")
+        cd_c = CapData("", standard=self.standard)
         cd_c.name = copy.copy(self.name)
         cd_c.data = self.data.copy()
         cd_c.data_filtered = self.data_filtered.copy()
@@ -1711,6 +1825,7 @@ class CapData(object):
         cd_c.pre_agg_cols = copy.copy(self.pre_agg_cols)
         cd_c.pre_agg_trans = copy.deepcopy(self.pre_agg_trans)
         cd_c.pre_agg_reg_trans = copy.deepcopy(self.pre_agg_reg_trans)
+        cd_c.iec_params = copy.deepcopy(self.iec_params)
         return cd_c
 
     def empty(self):
@@ -2965,6 +3080,10 @@ class CapData(object):
         """
         Calculate reporting conditons.
 
+        For IEC standard: Only POA is required for regression (power_corrected ~ poa),
+        but t_amb and w_vel may be needed for temperature correction calculations.
+        For ASTM standard: All three (poa, t_amb, w_vel) are required.
+
         Parameters
         ----------
         irr_bal: boolean, default False
@@ -2980,6 +3099,7 @@ class CapData(object):
                                           w_vel - mean
             Can pass a string function ('mean') to calculate each reporting
             condition the same way.
+            For IEC standard, only poa is strictly required for regression.
         freq: str
             String pandas offset alias to specify aggregation frequency
             for reporting condition calculation. Ex '60D' for 60 Days or
@@ -3006,7 +3126,20 @@ class CapData(object):
         pandas DataFrame
             If pred=True, then returns a pandas dataframe of results.
         """
-        df = self.floc[["poa", "t_amb", "w_vel"]]
+        # For IEC, we only strictly need poa, but try to get all for compatibility
+        if self.standard == "IEC":
+            try:
+                df = self.floc[["poa", "t_amb", "w_vel"]]
+            except (KeyError, ValueError):
+                # If t_amb or w_vel not available, just get poa
+                df = self.floc[["poa"]]
+                # Create dummy columns for compatibility
+                if "t_amb" not in df.columns:
+                    df["t_amb"] = np.nan
+                if "w_vel" not in df.columns:
+                    df["w_vel"] = np.nan
+        else:
+            df = self.floc[["poa", "t_amb", "w_vel"]]
         df = df.rename(
             columns={
                 df.columns[0]: "poa",
@@ -3132,6 +3265,10 @@ class CapData(object):
         """
         Perform a regression with statsmodels on filtered data.
 
+        For ASTM standard: performs multiple linear regression on measured power.
+        For IEC standard: first applies temperature correction, then performs
+        simple linear regression on corrected power.
+
         Parameters
         ----------
         filter: bool, default False
@@ -3150,16 +3287,110 @@ class CapData(object):
             Returns a filtered CapData object if filter is True and inplace is
             False.
         """
-        df = self.get_reg_cols()
+        if self.standard == "IEC":
+            # IEC 61724-2 workflow: temperature correction then simple regression
+            if self.iec_params["beta"] is None:
+                raise ValueError(
+                    "IEC standard requires beta (temperature coefficient) to be set. "
+                    "Use set_iec_params(beta=...) to set it."
+                )
 
-        reg = fit_model(df, fml=self.regression_formula)
+            # Get required columns - get_reg_cols returns columns renamed to regression variable names
+            df = self.get_reg_cols()
+            if "power" not in df.columns:
+                raise ValueError(
+                    "IEC standard requires 'power' in regression_cols. "
+                    "Use set_regression_cols(power=...) to set it."
+                )
+            if "poa" not in df.columns:
+                raise ValueError(
+                    "IEC standard requires 'poa' in regression_cols. "
+                    "Use set_regression_cols(poa=...) to set it."
+                )
+
+            # Calculate cell temperature
+            # First, try to get back of module temperature from data_filtered
+            t_mod = None
+            if "t_mod" in self.data_filtered.columns:
+                t_mod = self.data_filtered["t_mod"]
+            elif "t_amb" in df.columns and "w_vel" in df.columns:
+                # Calculate BOM temp from ambient temp and wind speed
+                t_mod = prtest.back_of_module_temp(
+                    df["poa"],
+                    df["t_amb"],
+                    df["w_vel"],
+                    module_type=self.iec_params["module_type"],
+                    racking=self.iec_params["racking"],
+                )
+            elif "t_amb" in df.columns:
+                # Use ambient temp as approximation if wind speed not available
+                # This is a simplified approach
+                t_mod = df["t_amb"]
+            else:
+                # Try to get from data_filtered using column groups
+                if hasattr(self, "column_groups") and "temp_mod" in self.column_groups:
+                    t_mod_cols = self.floc["temp_mod"]
+                    if len(t_mod_cols.columns) == 1:
+                        t_mod = t_mod_cols.iloc[:, 0]
+                    else:
+                        t_mod = t_mod_cols.mean(axis=1)
+                elif hasattr(self, "column_groups") and "temp_amb" in self.column_groups:
+                    t_amb_cols = self.floc["temp_amb"]
+                    if len(t_amb_cols.columns) == 1:
+                        t_mod = t_amb_cols.iloc[:, 0]
+                    else:
+                        t_mod = t_amb_cols.mean(axis=1)
+                else:
+                    raise ValueError(
+                        "IEC standard requires temperature data. Provide either t_mod "
+                        "column or t_amb (and optionally w_vel) in regression_cols."
+                    )
+
+            # Calculate cell temperature using IEC formula
+            # T_cell = T_mod + (E/E_o) * ΔT
+            t_cell = t_mod + (df["poa"] / self.iec_params["e_ref"]) * self.iec_params[
+                "delta_t"
+            ]
+
+            # Apply temperature correction
+            # P_corrected = P / (1 + β(T_cell - T_STC))
+            power_corrected = prtest.temp_correct_power(
+                df["power"],
+                self.iec_params["beta"],
+                t_cell,
+                base_temp=self.iec_params["t_stc"],
+            )
+
+            # Create dataframe with corrected power for regression
+            df_reg = pd.DataFrame(
+                {"power_corrected": power_corrected, "poa": df["poa"]},
+                index=df.index,
+            )
+
+            # Store corrected power in data_filtered for later use
+            if "power_corrected" not in self.data_filtered.columns:
+                self.data_filtered["power_corrected"] = power_corrected
+
+            # Perform simple linear regression: power_corrected ~ poa
+            reg = fit_model(df_reg, fml=self.regression_formula)
+
+        else:
+            # ASTM E2848 workflow: multiple linear regression
+            df = self.get_reg_cols()
+            reg = fit_model(df, fml=self.regression_formula)
+
+        # Store regression results before filtering (needed for both filter=True and filter=False)
+        self.regression_results = reg
 
         if filter:
             print("NOTE: Regression used to filter outlying points.\n\n")
             if summary:
                 print(reg.summary())
-            df = df[np.abs(reg.resid) < 2 * np.sqrt(reg.scale)]
-            dframe_flt = self.data_filtered.loc[df.index, :]
+            if self.standard == "IEC":
+                df_filtered = df_reg[np.abs(reg.resid) < 2 * np.sqrt(reg.scale)]
+            else:
+                df_filtered = df[np.abs(reg.resid) < 2 * np.sqrt(reg.scale)]
+            dframe_flt = self.data_filtered.loc[df_filtered.index, :]
             if inplace:
                 self.data_filtered = dframe_flt
             else:
@@ -3167,7 +3398,6 @@ class CapData(object):
         else:
             if summary:
                 print(reg.summary())
-            self.regression_results = reg
 
     def uncertainty():
         """Calculate random standard uncertainty of the regression.

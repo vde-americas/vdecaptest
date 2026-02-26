@@ -56,6 +56,7 @@ def load_pvsyst(
     name="pvsyst",
     egrid_unit_adj_factor=None,
     set_regression_columns=True,
+    standard="ASTM",
     **kwargs,
 ):
     """
@@ -75,6 +76,8 @@ def load_pvsyst(
     set_regression_columns : bool, default True
         By default sets power to E_Grid, poa to GlobInc, t_amb to T Amb, and w_vel to
         WindVel. Set to False to not set regression columns on load.
+    standard : str, default 'ASTM'
+        Capacity test standard to use. Options: 'ASTM' (ASTM E2848) or 'IEC' (IEC 61724-2).
     **kwargs
         Use to pass additional kwargs to pandas read_csv. Pass sep=';' to load files
         that use semicolons instead of commas as the separator.
@@ -154,7 +157,7 @@ def load_pvsyst(
     pvraw.drop("date", axis=1, inplace=True)
     pvraw = pvraw.rename(columns={"T Amb": "T_Amb"}).rename(columns={"TAmb": "T_Amb"})
 
-    cd = CapData(name)
+    cd = CapData(name, standard=standard)
     pvraw.index.name = "Timestamp"
     cd.data = pvraw.copy()
     cd.data["index"] = cd.data.index.to_series().apply(
@@ -459,6 +462,7 @@ def load_data(
     site=None,
     column_groups_template=False,
     verbose=False,
+    standard="ASTM",
     **kwargs,
 ):
     """
@@ -512,6 +516,8 @@ def load_data(
         manually create column groupings at `path`.
     verbose : bool, default False
         Set to True to print status of file loading.
+    standard : str, default 'ASTM'
+        Capacity test standard to use. Options: 'ASTM' (ASTM E2848) or 'IEC' (IEC 61724-2).
     **kwargs
         Passed to `DataLoader.load`, which passes them to the `file_reader` function.
         The default `file_reader` function passes them to pandas.read_csv.
@@ -529,7 +535,7 @@ def load_data(
     if reindex:
         dl.reindex()
 
-    cd = CapData(name)
+    cd = CapData(name, standard=standard)
     cd.data = dl.data.copy()
     cd.data_filtered = cd.data.copy()
     cd.data_loader = dl
