@@ -37,7 +37,6 @@ import param
 
 from captest import util
 from captest import plotting
-from captest import prtest
 
 # visualization library imports
 hv_spec = importlib.util.find_spec("holoviews")
@@ -3310,6 +3309,8 @@ class CapData(object):
 
             # Calculate cell temperature
             # First, try to get back of module temperature from data_filtered
+            from . import prtest
+            
             t_mod = None
             if "t_mod" in self.data_filtered.columns:
                 t_mod = self.data_filtered["t_mod"]
