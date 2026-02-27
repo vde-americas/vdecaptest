@@ -1,0 +1,26 @@
+# Template CSV file for measured capacity test data
+# Replace this file with your actual measured data
+# 
+# Expected columns:
+# - Index column: Timestamp (datetime index, will be used as DataFrame index)
+# - Irradiance columns: POA (plane of array) and/or GHI (global horizontal irradiance) measurements
+# - Power columns: System power output (meter and/or inverter level)
+# - Temperature columns: Ambient temperature, module temperature
+# - Wind columns: Wind speed measurements
+# - Optional: Rear POA irradiance for bifacial systems
+#
+# Example column names (customize based on your DAS system):
+# met1_poa_pyranometer, met2_poa_pyranometer, met1_ghi_pyranometer
+# meter_power, inv1_power, inv2_power, ...
+# met1_amb_temp, met2_amb_temp, met1_mod_temp
+# met1_windspeed, met2_windspeed
+# met1_rear_poa_pyranometer (for bifacial systems)
+#
+# Data should be time-series with consistent time intervals (typically 1-minute or 5-minute)
+# Timestamps should be in the first column (will become the index)
+#
+# Example format (first few rows):
+timestamp,met1_poa_pyranometer,met2_poa_pyranometer,met1_ghi_pyranometer,meter_power,inv1_power,inv2_power,met1_amb_temp,met1_windspeed
+2023-06-01 00:00:00,0.0,0.0,0.0,0.0,0.0,0.0,20.0,0.5
+2023-06-01 00:01:00,0.0,0.0,0.0,0.0,0.0,0.0,20.0,0.5
+2023-06-01 00:02:00,0.0,0.0,0.0,0.0,0.0,0.0,20.0,0.5

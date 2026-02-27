@@ -1,0 +1,5 @@
+[
+    ["irr_poa_col1", "irr_poa_col2"],
+    ["power_col1", "power_col2", "power_col3"],
+    ["poa_mod_csky", "irr_poa_col1", "irr_poa_col2", "irr_rpoa_col1", "irr_rpoa_col2", "ghi_mod_csky", "poa_mod_csky"]
+]

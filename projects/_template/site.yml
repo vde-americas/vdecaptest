@@ -1,0 +1,12 @@
+# Site Location and System Configuration
+# Update these values for your specific project
+
+loc:
+    latitude: 40.0      # Site latitude in decimal degrees (negative for Southern Hemisphere)
+    longitude: -105.0    # Site longitude in decimal degrees (negative for Western Hemisphere)
+    altitude: 1600.0     # Site elevation in meters above sea level
+    tz: America/Denver  # Timezone (use IANA timezone names, e.g., 'America/Denver', 'Etc/GMT+7', 'UTC')
+sys:
+    surface_tilt: 20     # Module tilt angle in degrees from horizontal (0 = flat, 90 = vertical)
+    surface_azimuth: 180 # Module azimuth angle in degrees (0/360 = North, 90 = East, 180 = South, 270 = West)
+    albedo: 0.2          # Ground albedo (reflectivity), typically 0.2-0.3 for grass/soil, 0.8+ for snow

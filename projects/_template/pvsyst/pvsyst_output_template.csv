@@ -1,0 +1,23 @@
+# Template CSV file for PVsyst simulation output
+# Replace this file with your actual PVsyst hourly output
+#
+# PVsyst output format typically includes:
+# - date: Timestamp column
+# - GlobInc: Global incident irradiance on array (W/m²)
+# - GlobHor: Global horizontal irradiance (W/m²)
+# - T Amb: Ambient temperature (°C)
+# - TArray: Array/module temperature (°C)
+# - WindVel: Wind velocity (m/s)
+# - FShdBm: Fractional shading (0-1, where 1 = no shading)
+# - EOutInv: Inverter output energy (W)
+# - E_Grid: Grid energy output (W)
+# - GlobBak: Backside irradiance for bifacial (W/m²)
+# - BackShd: Backside shading (W/m²)
+#
+# Note: PVsyst files typically have header rows before the actual data
+# pvcaptest's load_pvsyst() function handles parsing these headers automatically
+#
+# Example format (first few data rows after headers):
+date,GlobInc,GlobHor,T Amb,TArray,WindVel,FShdBm,IL Pmin,IL Vmin,IL Pmax,IL Vmax,EOutInv,E_Grid,GlobBak,BackShd
+01/01/90 00:00,0,0,11.7,11.7,3.1,1,0,0,0,0,0,0,0,0
+01/01/90 01:00,0,0,11.5,11.5,3.0,1,0,0,0,0,0,0,0,0

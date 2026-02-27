@@ -1,0 +1,25 @@
+# To create a conda environment using this file:
+# conda env create -f environment.yml
+name: pvcaptest
+channels:
+- conda-forge
+- nodefaults
+dependencies:
+- holoviews>=1.14.8
+- panel
+- colorcet
+- param
+- matplotlib
+- numpy
+- pandas>=1*
+- python>=3.9*
+- python-dateutil
+- statsmodels
+- scikit-learn
+- scipy
+- ipython
+- jupyterlab=4.1.8
+- notebook
+- pvcaptest
+- nodejs # for jupyterlab pyviz extension
+- openpyxl
