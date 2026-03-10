@@ -77,8 +77,23 @@ if pvlib_spec is not None:
     from pvlib.pvsystem import retrieve_sam
     from pvlib.modelchain import ModelChain
     from pvlib.clearsky import detect_clearsky
+    try:
+        from pvlib.spectrum import spectral_factor_firstsolar
+        from pvlib import solarposition
+        from pvlib import atmosphere
+    except ImportError:
+        # Older pvlib versions may have different import paths
+        try:
+            from pvlib.spectral import first_solar_spectral_correction as spectral_factor_firstsolar
+        except ImportError:
+            spectral_factor_firstsolar = None
+            solarposition = None
+            atmosphere = None
 else:
     warnings.warn("Clear sky functions will not work without the pvlib package.")
+    spectral_factor_firstsolar = None
+    solarposition = None
+    atmosphere = None
 
 
 plot_colors_brewer = {
@@ -1044,20 +1059,26 @@ def get_tz_index(time_source, loc):
         time_source, pd.core.frame.DataFrame
     ):
         time_source = time_source.index
-    if isinstance(time_source, pd.core.indexes.datetimes.DatetimeIndex):
-        if time_source.tz is None:
-            time_source = time_source.tz_localize(
-                loc["tz"], ambiguous="infer", nonexistent="NaT"
+    if not isinstance(time_source, pd.core.indexes.datetimes.DatetimeIndex):
+        raise ValueError(
+            "time_source must have a DatetimeIndex. "
+            "Got {} instead. Ensure the DataFrame or Series has a datetime index "
+            "before calling get_tz_index (e.g. when using reporting conditions "
+            "with spectral correction).".format(type(time_source).__name__)
+        )
+    if time_source.tz is None:
+        time_source = time_source.tz_localize(
+            loc["tz"], ambiguous="infer", nonexistent="NaT"
+        )
+        return time_source
+    else:
+        if loc["tz"] != str(time_source.tz):
+            warnings.warn(
+                "The DatetimeIndex of time_source has a timezone that "
+                "does not match the timezone in the loc dict. "
+                "Using the timezone of the time_source DatetimeIndex."
             )
-            return time_source
-        else:
-            if loc["tz"] != str(time_source.tz):
-                warnings.warn(
-                    "The DatetimeIndex of time_source has a timezone that "
-                    "does not match the timezone in the loc dict. "
-                    "Using the timezone of the time_source DatetimeIndex."
-                )
-            return time_source
+        return time_source
 
 
 def csky(time_source, loc=None, sys=None, concat=True, output="both"):
@@ -1271,6 +1292,47 @@ def predict_with_pvalue_check(cd, rc=None, pval_threshold=0.05):
         for key, pval in results.pvalues.items():
             if pval > pval_threshold:
                 modified_params[key] = 0
+
+    # Apply spectral correction to reporting conditions if it was used in regression
+    if cd.spectral_params["enabled"]:
+        # Create a temporary Series for POA values to apply correction
+        if isinstance(rc, pd.DataFrame):
+            if "poa" in rc.columns:
+                poa_rc = rc["poa"].copy()
+            else:
+                # Fallback: use first column
+                poa_rc = rc.iloc[:, 0].copy()
+        elif isinstance(rc, dict):
+            poa_rc = pd.Series([rc["poa"]])
+        else:
+            poa_rc = pd.Series([rc])
+        
+        # Apply spectral correction - need DatetimeIndex for get_tz_index/solarposition
+        if not isinstance(poa_rc.index, pd.DatetimeIndex):
+            n = len(poa_rc)
+            if len(cd.data_filtered) >= n:
+                poa_rc.index = cd.data_filtered.index[:n].copy()
+            elif len(cd.data_filtered) > 0:
+                start = cd.data_filtered.index[0]
+                freq = cd.data_filtered.index.freq if getattr(cd.data_filtered.index, "freq", None) is not None else "H"
+                poa_rc.index = pd.date_range(start=start, periods=n, freq=freq)
+            else:
+                poa_rc.index = pd.date_range(start=pd.Timestamp.now(), periods=n, freq="H")
+        
+        poa_rc_corrected = cd._apply_spectral_correction(poa_rc)
+        
+        # Update rc with corrected POA
+        if isinstance(rc, pd.DataFrame):
+            rc = rc.copy()
+            if "poa" in rc.columns:
+                rc["poa"] = poa_rc_corrected.values
+            else:
+                rc.iloc[:, 0] = poa_rc_corrected.values
+        elif isinstance(rc, dict):
+            rc = rc.copy()
+            rc["poa"] = poa_rc_corrected.iloc[0]
+        else:
+            rc = poa_rc_corrected.iloc[0]
 
     # For IEC standard, regression is on power_corrected ~ poa
     # So we only need poa in the reporting conditions
@@ -1735,6 +1797,14 @@ class CapData(object):
             "module_type": "glass_cell_poly",  # Module type for cell_temp calculation
             "racking": "open_rack",  # Racking type for cell_temp calculation
         }
+        # Spectral correction parameters
+        self.spectral_params = {
+            "enabled": False,  # Whether spectral correction is enabled
+            "module_type": None,  # First Solar module type (required if enabled)
+            "airmass": None,  # Optional: provide airmass directly
+            "precipitable_water": None,  # Optional: provide precipitable water directly
+            "location": None,  # Optional: location dict for calculating airmass/precipitable_water
+        }
         self.loc = LocIndexer(self)
         self.floc = FilteredLocIndexer(self)
 
@@ -1808,6 +1878,185 @@ class CapData(object):
         if racking is not None:
             self.iec_params["racking"] = racking
 
+    def set_spectral_params(
+        self,
+        enabled=None,
+        module_type=None,
+        airmass=None,
+        precipitable_water=None,
+        location=None,
+    ):
+        """
+        Set spectral correction parameters for First Solar spectral correction.
+
+        Parameters
+        ----------
+        enabled : bool, optional
+            Whether to enable spectral correction. Must be True to apply correction.
+        module_type : str, optional
+            First Solar module type. Options: 'cdte', 'monosi', 'multisi', 'polysi',
+            'cigs', 'asi'. Required if enabled is True.
+        airmass : float or Series, optional
+            Air mass values. If not provided, will be calculated from location
+            and timestamps. Can be a single value or a Series matching data index.
+        precipitable_water : float or Series, optional
+            Precipitable water in cm. If not provided, will be estimated from
+            location or use default. Can be a single value or a Series matching data index.
+        location : dict, optional
+            Location dictionary with 'latitude', 'longitude', 'altitude', 'tz'.
+            Required if airmass or precipitable_water need to be calculated.
+            Format matches that used in csky() function.
+        """
+        if enabled is not None:
+            self.spectral_params["enabled"] = enabled
+        if module_type is not None:
+            valid_types = ["cdte", "monosi", "multisi", "polysi", "cigs", "asi"]
+            if module_type not in valid_types:
+                warnings.warn(
+                    f"Module type '{module_type}' not in recognized types: {valid_types}. "
+                    "Proceeding anyway, but verify pvlib compatibility."
+                )
+            self.spectral_params["module_type"] = module_type
+        if airmass is not None:
+            self.spectral_params["airmass"] = airmass
+        if precipitable_water is not None:
+            self.spectral_params["precipitable_water"] = precipitable_water
+        if location is not None:
+            self.spectral_params["location"] = location
+
+    def _apply_spectral_correction(self, poa_series):
+        """
+        Apply First Solar spectral correction to POA irradiance.
+
+        Parameters
+        ----------
+        poa_series : pd.Series
+            POA irradiance values to correct, indexed by datetime.
+
+        Returns
+        -------
+        pd.Series
+            Spectrally corrected POA irradiance with same index.
+        """
+        if spectral_factor_firstsolar is None:
+            raise ValueError(
+                "pvlib spectral correction functions not available. "
+                "Install pvlib with spectral correction support."
+            )
+
+        if not self.spectral_params["enabled"]:
+            return poa_series
+
+        if self.spectral_params["module_type"] is None:
+            raise ValueError(
+                "Spectral correction enabled but module_type not set. "
+                "Use set_spectral_params(module_type=...) to set it."
+            )
+
+        # Get airmass
+        if self.spectral_params["airmass"] is not None:
+            airmass = self.spectral_params["airmass"]
+            if isinstance(airmass, (int, float)):
+                # Single value - broadcast to all timestamps
+                airmass = pd.Series(airmass, index=poa_series.index)
+            elif isinstance(airmass, pd.Series):
+                # Ensure index matches
+                if not airmass.index.equals(poa_series.index):
+                    airmass = airmass.reindex(poa_series.index, method="nearest")
+        else:
+            # Calculate airmass from location and timestamps
+            if self.spectral_params["location"] is None:
+                raise ValueError(
+                    "Airmass not provided and location not set. "
+                    "Either provide airmass directly or set location using "
+                    "set_spectral_params(location=...)."
+                )
+            if solarposition is None:
+                raise ValueError(
+                    "pvlib solarposition module not available. "
+                    "Cannot calculate airmass automatically."
+                )
+            loc = self.spectral_params["location"]
+            times = get_tz_index(poa_series, loc)
+            solar_pos = solarposition.get_solarposition(times, loc["latitude"], loc["longitude"])
+            airmass = solar_pos["airmass"]
+
+        # Get precipitable water
+        if self.spectral_params["precipitable_water"] is not None:
+            pw = self.spectral_params["precipitable_water"]
+            if isinstance(pw, (int, float)):
+                # Single value - broadcast to all timestamps
+                pw = pd.Series(pw, index=poa_series.index)
+            elif isinstance(pw, pd.Series):
+                # Ensure index matches
+                if not pw.index.equals(poa_series.index):
+                    pw = pw.reindex(poa_series.index, method="nearest")
+        else:
+            # Estimate precipitable water
+            if self.spectral_params["location"] is not None and atmosphere is not None:
+                loc = self.spectral_params["location"]
+                times = get_tz_index(poa_series, loc)
+                # Use simple estimation based on location and time of year
+                # pvlib's gueymard94_pw can estimate from location
+                try:
+                    pw = atmosphere.gueymard94_pw(
+                        times, loc["latitude"], loc["longitude"], loc.get("altitude", 0)
+                    )
+                except (AttributeError, TypeError):
+                    # Fallback to default value if estimation fails
+                    pw = pd.Series(1.0, index=poa_series.index)
+                    warnings.warn(
+                        "Could not estimate precipitable water. Using default value of 1.0 cm."
+                    )
+            else:
+                # Use default value
+                pw = pd.Series(1.0, index=poa_series.index)
+                if self.spectral_params["location"] is None:
+                    warnings.warn(
+                        "Precipitable water not provided and location not set. "
+                        "Using default value of 1.0 cm. For better accuracy, "
+                        "provide precipitable_water or set location."
+                    )
+
+        # Calculate absolute airmass (pressure-adjusted)
+        # For simplicity, use relative airmass (pvlib function handles conversion if needed)
+        airmass_absolute = airmass
+
+        # Apply spectral correction
+        # Note: pvlib's spectral_factor_firstsolar returns a multiplier
+        # The function signature may vary by pvlib version
+        try:
+            # Try newer API first (spectral_factor_firstsolar)
+            spectral_factor = spectral_factor_firstsolar(
+                airmass_absolute, pw, module_type=self.spectral_params["module_type"]
+            )
+        except TypeError:
+            # Try older API if different signature
+            try:
+                spectral_factor = spectral_factor_firstsolar(
+                    airmass_absolute.values if isinstance(airmass_absolute, pd.Series) else airmass_absolute,
+                    pw.values if isinstance(pw, pd.Series) else pw,
+                    self.spectral_params["module_type"]
+                )
+                if not isinstance(spectral_factor, pd.Series):
+                    spectral_factor = pd.Series(spectral_factor, index=poa_series.index)
+            except Exception as e:
+                raise ValueError(
+                    f"Error applying spectral correction: {e}. "
+                    "Check pvlib version and function signature."
+                ) from e
+
+        # Ensure spectral_factor is a Series with matching index
+        if not isinstance(spectral_factor, pd.Series):
+            spectral_factor = pd.Series(spectral_factor, index=poa_series.index)
+        elif not spectral_factor.index.equals(poa_series.index):
+            spectral_factor = spectral_factor.reindex(poa_series.index, method="nearest")
+
+        # Apply correction: corrected_POA = POA * spectral_factor
+        poa_corrected = poa_series * spectral_factor
+
+        return poa_corrected
+
     def copy(self):
         """Create and returns a copy of self."""
         cd_c = CapData("", standard=self.standard)
@@ -1825,6 +2074,7 @@ class CapData(object):
         cd_c.pre_agg_trans = copy.deepcopy(self.pre_agg_trans)
         cd_c.pre_agg_reg_trans = copy.deepcopy(self.pre_agg_reg_trans)
         cd_c.iec_params = copy.deepcopy(self.iec_params)
+        cd_c.spectral_params = copy.deepcopy(self.spectral_params)
         return cd_c
 
     def empty(self):
@@ -3146,6 +3396,12 @@ class CapData(object):
                 df.columns[2]: "w_vel",
             }
         )
+        
+        # Apply spectral correction to POA if enabled
+        if self.spectral_params["enabled"]:
+            poa_original = df["poa"]
+            poa_corrected = self._apply_spectral_correction(poa_original)
+            df["poa"] = poa_corrected
 
         RCs_df = pd.DataFrame(df.agg(func)).T
 
@@ -3267,6 +3523,9 @@ class CapData(object):
         For ASTM standard: performs multiple linear regression on measured power.
         For IEC standard: first applies temperature correction, then performs
         simple linear regression on corrected power.
+        
+        If spectral correction is enabled, POA irradiance is corrected before
+        regression calculations.
 
         Parameters
         ----------
@@ -3286,6 +3545,18 @@ class CapData(object):
             Returns a filtered CapData object if filter is True and inplace is
             False.
         """
+        # Apply spectral correction to POA if enabled
+        poa_spectral_corrected = None
+        if self.spectral_params["enabled"]:
+            # Get POA data for spectral correction
+            df_poa = self.get_reg_cols(reg_vars="poa")
+            poa_original = df_poa["poa"]
+            # Apply spectral correction
+            poa_spectral_corrected = self._apply_spectral_correction(poa_original)
+            # Store corrected POA in data_filtered for reference
+            if "poa_spectral_corrected" not in self.data_filtered.columns:
+                self.data_filtered["poa_spectral_corrected"] = poa_spectral_corrected
+
         if self.standard == "IEC":
             # IEC 61724-2 workflow: temperature correction then simple regression
             if self.iec_params["beta"] is None:
@@ -3306,6 +3577,10 @@ class CapData(object):
                     "IEC standard requires 'poa' in regression_cols. "
                     "Use set_regression_cols(poa=...) to set it."
                 )
+
+            # Replace POA with spectrally corrected version if enabled
+            if poa_spectral_corrected is not None:
+                df["poa"] = poa_spectral_corrected
 
             # Calculate cell temperature
             # First, try to get back of module temperature from data_filtered
@@ -3378,6 +3653,9 @@ class CapData(object):
         else:
             # ASTM E2848 workflow: multiple linear regression
             df = self.get_reg_cols()
+            # Replace POA with spectrally corrected version if enabled
+            if poa_spectral_corrected is not None:
+                df["poa"] = poa_spectral_corrected
             reg = fit_model(df, fml=self.regression_formula)
 
         # Store regression results before filtering (needed for both filter=True and filter=False)
