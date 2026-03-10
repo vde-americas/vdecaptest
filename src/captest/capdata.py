@@ -1319,7 +1319,7 @@ def predict_with_pvalue_check(cd, rc=None, pval_threshold=0.05):
             else:
                 poa_rc.index = pd.date_range(start=pd.Timestamp.now(), periods=n, freq="H")
         
-        poa_rc_corrected = cd._apply_spectral_correction(poa_rc)
+        poa_rc_corrected = cd.spectral_correction(poa_rc)
         
         # Update rc with corrected POA
         if isinstance(rc, pd.DataFrame):
@@ -1924,7 +1924,7 @@ class CapData(object):
         if location is not None:
             self.spectral_params["location"] = location
 
-    def _apply_spectral_correction(self, poa_series):
+    def spectral_correction(self, poa_series):
         """
         Apply First Solar spectral correction to POA irradiance.
 
@@ -3400,7 +3400,7 @@ class CapData(object):
         # Apply spectral correction to POA if enabled
         if self.spectral_params["enabled"]:
             poa_original = df["poa"]
-            poa_corrected = self._apply_spectral_correction(poa_original)
+            poa_corrected = self.spectral_correction(poa_original)
             df["poa"] = poa_corrected
 
         RCs_df = pd.DataFrame(df.agg(func)).T
@@ -3552,7 +3552,7 @@ class CapData(object):
             df_poa = self.get_reg_cols(reg_vars="poa")
             poa_original = df_poa["poa"]
             # Apply spectral correction
-            poa_spectral_corrected = self._apply_spectral_correction(poa_original)
+            poa_spectral_corrected = self.spectral_correction(poa_original)
             # Store corrected POA in data_filtered for reference
             if "poa_spectral_corrected" not in self.data_filtered.columns:
                 self.data_filtered["poa_spectral_corrected"] = poa_spectral_corrected

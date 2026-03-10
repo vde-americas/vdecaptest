@@ -1,0 +1,9 @@
+loc:
+    latitude: 39.742
+    longitude: -105.18
+    altitude: 1828.8
+    tz: Etc/GMT+7
+sys:
+    surface_tilt: 40
+    surface_azimuth: 180
+    albedo: 0.2

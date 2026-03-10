@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import param
 
-from captest import capdata
+from . import capdata
 
 
 emp_heat_coeff = {

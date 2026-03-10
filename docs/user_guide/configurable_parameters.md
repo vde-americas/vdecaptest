@@ -508,6 +508,69 @@ das = ct.load_data('path/to/data.csv', site=site)
 
 - **When to change:** If standard requires different minimum hours
 
+## 13. Spectral Correction Parameters
+
+**Parameter:** `set_spectral_params(enabled, module_type, airmass, precipitable_water, location)`
+
+Spectral correction adjusts POA irradiance for spectral mismatch effects, which is important for thin-film modules (especially First Solar CdTe modules) where the spectral response differs from crystalline silicon reference cells.
+
+- **Options:**
+  - `enabled`: Boolean - whether to enable spectral correction (default: False)
+  - `module_type`: str - First Solar module type. Options: `'cdte'`, `'monosi'`, `'multisi'`, `'polysi'`, `'cigs'`, `'asi'`. Required if enabled is True.
+  - `airmass`: float or Series, optional - Air mass values. If not provided, will be calculated from location and timestamps.
+  - `precipitable_water`: float or Series, optional - Precipitable water in cm. If not provided, will be estimated from location or use default (1.0 cm).
+  - `location`: dict, optional - Location dictionary with `'latitude'`, `'longitude'`, `'altitude'`, `'tz'`. Required if airmass or precipitable_water need to be calculated.
+
+- **How to set:**
+  ```python
+  # Basic setup with module type and location (auto-calculates airmass/precipitable_water)
+  das.set_spectral_params(
+      enabled=True,
+      module_type='cdte',  # For First Solar CdTe modules
+      location={
+          'latitude': 40.0,
+          'longitude': -105.0,
+          'altitude': 1600,
+          'tz': 'America/Denver'
+      }
+  )
+  
+  # With all parameters provided
+  das.set_spectral_params(
+      enabled=True,
+      module_type='cdte',
+      airmass=1.5,  # Single value or Series
+      precipitable_water=1.2,  # Single value or Series in cm
+      location={'latitude': 40.0, 'longitude': -105.0, 'altitude': 1600, 'tz': 'America/Denver'}
+  )
+  
+  # With time-varying airmass and precipitable water
+  airmass_series = pd.Series([1.2, 1.5, 2.0], index=das.data_filtered.index[:3])
+  pw_series = pd.Series([0.8, 1.0, 1.2], index=das.data_filtered.index[:3])
+  das.set_spectral_params(
+      enabled=True,
+      module_type='cdte',
+      airmass=airmass_series,
+      precipitable_water=pw_series
+  )
+  ```
+
+- **When to change:**
+  - Enable for thin-film modules (CdTe, CIGS, a-Si) where spectral mismatch is significant
+  - Required for First Solar modules when spectral correction is specified by test methodology
+  - Typically not needed for crystalline silicon modules
+
+- **Impact:**
+  - Automatically applies spectral correction to POA irradiance before regression
+  - Corrected POA is used in all regression calculations (ASTM and IEC standards)
+  - Reporting conditions also use spectrally-corrected POA values
+  - Corrected POA is stored in `data_filtered` as `poa_spectral_corrected` for reference
+
+- **Workflow Integration:**
+  - Spectral correction is applied automatically in `fit_regression()` if enabled
+  - Reporting conditions calculated by `rep_cond()` use corrected POA if enabled
+  - Predictions use corrected reporting conditions if spectral correction was used in regression
+
 ## Summary Checklist for Each New Capacity Test
 
 1. **Standard:** Set `standard='ASTM'` or `'IEC'` when loading data
@@ -528,3 +591,4 @@ das = ct.load_data('path/to/data.csv', site=site)
    - Adjust `rc_kwargs` if needed for reporting irradiance selection
 9. **Nameplate & Tolerance:** Set in `captest_results()` call
 10. **P-value Check:** Use `check_pvalues=True` to verify coefficient significance
+11. **Spectral Correction:** If using thin-film modules, enable and configure spectral correction before regression
